@@ -37,27 +37,41 @@ export async function runTelemetrySimulation() {
       let solarV = 0;
       let solarI = 0;
       
+      // 1. SOLAR SIMULATION (2.25kWp)
       if (preciseHour >= 6 && preciseHour <= 18) {
-          // Daylight hours (smooth curve using preciseHour)
           const peakAt = 12;
           const variance = 1 - Math.abs(preciseHour - peakAt) / 6;
-          const baseline = site.capacity || 2.25; // Adjusted for a 2.25kWp solar capacity
-          solarP = Math.max(0, (baseline * variance) + ((Math.random() * 0.2) - 0.1)); // Max 2.25kW peak +/- slight cloud variance
-          solarV = 90 + Math.random() * 30; // A 2.25kWp string typically runs around 90V - 120V
+          const baseline = site.capacity || 2.25;
+          const idealP = Math.max(0, (baseline * variance));
+
+          // 🌩️ VOLATILITY: 10% chance of a "Cloud Drop"
+          const isCloudy = Math.random() < 0.10;
+          const cloudFactor = isCloudy ? (0.1 + Math.random() * 0.3) : 1.0; 
+          
+          solarP = Number((idealP * cloudFactor + (Math.random() * 0.1)).toFixed(3));
+          solarV = 90 + Math.random() * 30;
           solarI = solarP > 0 ? (solarP * 1000) / solarV : 0;
       } else {
-          solarV = 2 + Math.random() * 3; // Low moonlight/ambient voltage
+          solarV = 2 + Math.random() * 3;
       }
 
       // 2. GRID SIMULATION (220V-240V)
-      const gridV = 220 + Math.random() * 15;
+      // ⚡ VOLATILITY: 5% chance of a Voltage Surge or Dip
+      const isGridUnstable = Math.random() < 0.05;
+      const gridVLine = isGridUnstable ? (Math.random() > 0.5 ? 265 : 170) : 230; 
+      const gridV = gridVLine + (Math.random() * 10 - 5);
+      
       const gridI = 1 + Math.random() * 5;
-      const gridP = (gridV * gridI) / 1000;
+      const gridP = Number(((gridV * gridI) / 1000).toFixed(3));
 
       // 3. LOAD SIMULATION (Consumption)
+      // 🔌 VOLATILITY: 15% chance of an "Appliance Spike" (AC/Geyser)
+      const isSpiking = Math.random() < 0.15;
+      const baseLoad = 0.5 + Math.random() * 2;
+      const loadP = isSpiking ? baseLoad + (2 + Math.random() * 4) : baseLoad;
+      
       const loadV = 230 + Math.random() * 5;
-      const loadI = 4 + Math.random() * 8;
-      const loadP = (loadV * loadI) / 1000;
+      const loadI = (loadP * 1000) / loadV;
 
       // 4. BATTERY SIMULATION
       // State depends on solar/load balance
@@ -67,10 +81,10 @@ export async function runTelemetrySimulation() {
 
       if (solarP > loadP + 0.5) {
           batteryState = "charging";
-          chargeCurrent = (solarP - loadP) * 10; // Simple heuristic
+          chargeCurrent = Number(((solarP - loadP) * 10).toFixed(2)); 
       } else if (loadP > solarP + 0.1) {
           batteryState = "discharging";
-          dischargeCurrent = (loadP - solarP) * 8;
+          dischargeCurrent = Number(((solarP - loadP) * 8).toFixed(2)); // This will naturally be a negative number
       } else {
           batteryState = Math.random() > 0.1 ? "idle" : "charging";
       }
