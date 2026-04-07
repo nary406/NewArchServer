@@ -1,0 +1,8 @@
+node_modules/
+lib/
+npm-debug.log
+yarn-error.log
+firebase-debug.log
+.env
+.env.local
+.secret.local

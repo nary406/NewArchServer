@@ -1,0 +1,249 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id            String     @id @default(cuid())
+  email         String     @unique
+  role          String     @default("user")
+  passwordHash  String?
+  assignedSites String[]   // TODO: Remove after join table migration
+  siteAccess    SiteUser[]
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+}
+
+model Site {
+  id               String            @id @default(cuid())
+  name             String
+  location         String
+  status           String            @default("online")
+  capacity         Float             @default(0)
+  lat              Float?
+  lng              Float?
+  imageUrl         String?
+  hardwareId       String?           @unique
+  timezone         String            @default("Asia/Kolkata")
+  
+  // 🔥 Device Health Layer
+  lastSeen         DateTime          @default(now())
+  signalStrength   Int?              // -100 to 0 dBm
+  firmwareVersion  String?           @default("1.0.0")
+  uptime           Int?              // seconds
+  
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+  
+  alerts           Alert[]
+  alertRules       AlertRule[]
+  currentDayEnergy CurrentDayEnergy?
+  dailyEnergy      DailyEnergy[]
+  installation     Installation?
+  liveStatus       DeviceLiveStatus?
+  monthlyEnergy    MonthlyEnergy[]
+  telemetry        TelemetryData[]
+  yearlyEnergy     YearlyEnergy[]
+  authorizedUsers  SiteUser[]
+}
+
+model Installation {
+  id             String    @id @default(cuid())
+  siteId         String    @unique
+  installerName  String?
+  installDate    DateTime?
+  hardwareModel  String?
+  warrantyExpiry DateTime?
+  notes          String?
+  site           Site      @relation(fields: [siteId], references: [id], onDelete: Cascade)
+}
+
+model DeviceLiveStatus {
+  deviceId      String   @id // Hardware unique identifier
+  siteId        String   @unique
+  
+  // 🔆 Solar (Generation)
+  solarVoltage  Float?   @default(0)
+  solarCurrent  Float?   @default(0)
+  solarPowerKw  Float?   @default(0)
+
+  // ⚡ Grid (Import / Export)
+  gridVoltage   Float?   @default(0)
+  gridCurrent   Float?   @default(0)
+  gridPowerKw   Float?   @default(0)
+
+  // 🏠 Load (Consumption)
+  loadVoltage   Float?   @default(0)
+  loadCurrent   Float?   @default(0)
+  loadPowerKw   Float?   @default(0)
+
+  // 🔋 Battery
+  batterySoc    Float?   @default(0)
+  batteryPowerKw Float?   @default(0)
+  batteryState  String?   @default("idle")
+  batteryChargeCurrent Float? @default(0)
+  batteryDischargeCurrent Float? @default(0)
+  
+  // 🔋 Multi-Bank Battery Health
+  battery1Voltage Float? @default(0)
+  battery2Voltage Float? @default(0)
+  battery3Voltage Float? @default(0)
+  battery4Voltage Float? @default(0)
+
+  // 📡 Device Health
+  signalStrengthDbm Int?
+  uptimeSeconds     Int?
+
+  // 🟢 Status
+  lastSeen      DateTime? @default(now())
+  status        String    @default("online")
+
+  // 🔄 Firmware
+  firmwareVersion String?
+
+  updatedAt     DateTime  @updatedAt
+  
+  site          Site      @relation(fields: [siteId], references: [id], onDelete: Cascade)
+
+  @@map("DeviceLiveStatus")
+}
+
+model TelemetryData {
+  id                      String   @id @default(cuid()) @map("Id")
+  siteId                  String   @map("SiteId")
+  timestamp               DateTime @map("Timestamp")
+  solarPower              Float    @map("SolarPower")
+  gridPower               Float    @map("GridPower")
+  loadPower               Float    @map("LoadPower")
+  batteryState            String?  @map("BatteryState")
+  batteryChargeCurrent    Float?   @map("BatteryChargeCurrent")
+  batteryDischargeCurrent Float?   @map("BatteryDischargeCurrent")
+  gridCurrent             Float?   @map("GridCurrent")
+  gridVoltage             Float?   @map("GridVoltage")
+  loadCurrent             Float?   @map("LoadCurrent")
+  loadVoltage             Float?   @map("LoadVoltage")
+  solarCurrent            Float?   @map("SolarCurrent")
+  solarVoltage            Float?   @map("SolarVoltage")
+  battery1Voltage         Float?   @map("Battery1Voltage")
+  battery2Voltage         Float?   @map("Battery2Voltage")
+  battery3Voltage         Float?   @map("Battery3Voltage")
+  battery4Voltage         Float?   @map("Battery4Voltage")
+  site                    Site     @relation(fields: [siteId], references: [id], onDelete: Cascade)
+
+  // 🔥 Data Integrity Layer: No duplicate readings for the same site at the same time
+  @@unique([siteId, timestamp])
+  @@index([siteId, timestamp(sort: Desc)])
+  @@map("TelemetryData")
+}
+
+model AlertRule {
+  id        String  @id @default(cuid())
+  siteId    String
+  name      String
+  parameter String
+  operator  String
+  threshold Float
+  severity  String
+  enabled   Boolean @default(true)
+  site      Site    @relation(fields: [siteId], references: [id], onDelete: Cascade)
+}
+
+model Alert {
+  id         String    @id @default(cuid())
+  siteId     String
+  ruleId     String?
+  severity   String
+  message    String
+  isResolved Boolean   @default(false)
+  resolvedAt DateTime?
+  lastSeen   DateTime  @default(now())
+  count      Int       @default(1)
+  timestamp  DateTime  @default(now())
+  site       Site      @relation(fields: [siteId], references: [id], onDelete: Cascade)
+
+  @@index([siteId, isResolved])
+}
+
+model DailyEnergy {
+  id          String   @id @default(cuid())
+  siteId      String
+  date        DateTime
+  solarEnergy Float
+  gridEnergy  Float
+  loadEnergy  Float
+  site        Site     @relation(fields: [siteId], references: [id], onDelete: Cascade)
+
+  @@unique([siteId, date])
+  @@map("DailyEnergy")
+}
+
+model MonthlyEnergy {
+  id          String @id @default(cuid())
+  siteId      String
+  month       Int
+  year        Int
+  solarEnergy Float
+  gridEnergy  Float
+  loadEnergy  Float
+  site        Site   @relation(fields: [siteId], references: [id], onDelete: Cascade)
+
+  @@unique([siteId, month, year])
+  @@map("MonthlyEnergy")
+}
+
+model YearlyEnergy {
+  id          String @id @default(cuid())
+  siteId      String
+  year        Int
+  solarEnergy Float
+  gridEnergy  Float
+  loadEnergy  Float
+  site        Site   @relation(fields: [siteId], references: [id], onDelete: Cascade)
+
+  @@unique([siteId, year])
+  @@map("YearlyEnergy")
+}
+
+model CurrentDayEnergy {
+  id          String   @id @default(cuid())
+  siteId      String   @unique
+  date        DateTime @default(now())
+  solarEnergy Float    @default(0)
+  gridEnergy  Float    @default(0)
+  loadEnergy  Float    @default(0)
+  lastUpdated DateTime @updatedAt
+  site        Site     @relation(fields: [siteId], references: [id], onDelete: Cascade)
+  @@map("CurrentDayEnergy")
+}
+
+model SiteUser {
+  id         String   @id @default(cuid())
+  userId     String
+  siteId     String
+  role       String   @default("viewer") // "viewer", "operator", "admin"
+  assignedAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  site Site @relation(fields: [siteId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, siteId])
+  @@index([userId])
+  @@index([siteId])
+}
+
+// 🔥 Firmware OTA System
+model Firmware {
+  id          String   @id @default(cuid())
+  version     String   @unique
+  url         String
+  checksum    String
+  releaseDate DateTime @default(now())
+  isCritical  Boolean  @default(false)
+  notes       String?
+}
+
+
