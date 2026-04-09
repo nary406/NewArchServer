@@ -246,4 +246,14 @@ model Firmware {
   notes       String?
 }
 
-
+// 🧠 Rolling Alert State (Time-Window Alerts)
+// Updated incrementally per-reading, no heavy queries needed
+model DeviceAlertState {
+  siteId            String   @id
+  lastActiveTime    DateTime @default(now())
+  avgPowerLast1Hour Float    @default(0)
+  readingCount1Hour Int      @default(0)
+  powerSum1Hour     Float    @default(0)
+  windowStart       DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+}

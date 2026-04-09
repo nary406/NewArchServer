@@ -1,7 +1,7 @@
 import prisma from "../../shared/db/prisma";
-import { getSiteLocalDate, getStartOfSiteDay, getISTDate } from "../../shared/utils/timeUtils";
+import { getSiteLocalDate, getStartOfSiteDay, getISTDate, isDifferentDay } from "../../shared/utils/timeUtils";
 import { checkSiteAccess } from "../site/site.service";
-import { publishAlertToQueue } from "../../shared/pubsub";
+import { publishEnergyToQueue, publishAlertToQueue } from "../../shared/pubsub";
 
 /**
  * FETCH HISTORICAL TELEMETRY (Multi-Tenant Hardened)
@@ -85,7 +85,6 @@ export async function getSiteEnergyInternal(userId: string, siteId: string) {
             })
         ]);
         
-        // ... (rest of logic same)
         console.log(`[getSiteEnergyInternal] Found ${dailyHist.length} daily, ${monthlyEnergy.length} monthly, ${yearlyEnergy.length} yearly records. todayEnergy found: ${!!todayEnergy}`);
 
         // Live Injection for Energy Charts
@@ -136,13 +135,11 @@ export async function getLiveReadingInternal(userId: string, siteId: string) {
         console.warn(`[getLiveReadingInternal] Complete failure to find live data:`, e.message);
     }
 
-
     const currentDay = await (prisma as any).currentDayEnergy.findUnique({ where: { siteId } }).catch(() => null);
 
     return {
         latestReading: (() => {
             if (!live) return null;
-            // New Schema: Flattened Relational
             if (live.solarPowerKw !== undefined) {
                 return {
                     solarPower: live.solarPowerKw || 0,
@@ -167,7 +164,6 @@ export async function getLiveReadingInternal(userId: string, siteId: string) {
                     status: live.status
                 };
             }
-            // Old Schema: Legacy JSON
             return live.data || null;
         })(),
         currentDayEnergy: currentDay ? {
@@ -179,38 +175,36 @@ export async function getLiveReadingInternal(userId: string, siteId: string) {
     };
 }
 
-/**
- * ASYNCHRONOUS WORKER: PROCESS TELEMETRY (Queue -> DB)
- * Full database persistence and energy calculation logic.
- */
-export async function processIngestionInBackground(payload: any) {
+// ═══════════════════════════════════════════════════════════════════════════
+// WORKER 1: TELEMETRY WRITER (Write-Only, No Energy Math)
+// Responsibility: TelemetryData + DeviceLiveStatus + Site.lastSeen
+// Then fans out to Worker 2 (Energy) and Worker 3 (Alerts) via Pub/Sub
+// ═══════════════════════════════════════════════════════════════════════════
+export async function processTelemetryWrite(payload: any) {
     const { deviceId, siteId, ...data } = payload;
     
     const site = await (prisma.site as any).findUnique({
-        where: { id: siteId },
-        include: { alertRules: true }
+        where: { id: siteId }
     });
 
     if (!site) return;
 
-    // ── 1. DATA INTEGRITY LAYER: Timestamp & Duplicate Check ──────────────────
+    // ── DATA INTEGRITY: Timestamp & Duplicate Check ──────────────────────────
     const serverTime = getISTDate();
     const ingestTime = data.timestamp ? new Date(data.timestamp) : serverTime;
 
-    // Reject readings from the future (>5min gap) or too old (>24h)
     const timeDiffMs = Math.abs(serverTime.getTime() - ingestTime.getTime());
     if (timeDiffMs > 24 * 60 * 60 * 1000 || ingestTime.getTime() > serverTime.getTime() + 300000) {
-        console.warn(`[Integrity] Dropped background process for ${deviceId}: Invalid timestamp`);
+        console.warn(`[Worker1] Dropped for ${deviceId}: Invalid timestamp`);
         return;
     }
 
-    // Duplicate Check
     const duplicate = await (prisma.telemetryData as any).findUnique({
         where: { siteId_timestamp: { siteId: site.id, timestamp: ingestTime } }
     });
     if (duplicate) return;
 
-    // ── 2. ANOMALY FILTERING ──────────────────────────────────────────────────
+    // ── ANOMALY FILTERING ────────────────────────────────────────────────────
     const round = (val: any) => Math.round((Number(val) || 0) * 100) / 100;
 
     const validate = (val: any, min: number, max: number, label: string) => {
@@ -225,10 +219,7 @@ export async function processIngestionInBackground(payload: any) {
     const solarV = validate(data.solarVoltage, 0, 800, "SolarV");
     const gridV  = validate(data.gridVoltage, 0, 450, "GridV"); 
 
-    const siteTimezone = site.timezone || "Asia/Kolkata";
-    const localDate = getSiteLocalDate(siteTimezone);
-    const todayDate = getStartOfSiteDay(localDate);
-
+    // ── TRANSACTION: Write Telemetry + Update Live Status ─────────────────────
     await (prisma as any).$transaction(async (tx: any) => {
         // 1. Create Telemetry Record
         await tx.telemetryData.create({
@@ -284,6 +275,12 @@ export async function processIngestionInBackground(payload: any) {
                 batterySoc: round(data.soc),
                 batteryPowerKw: round((data.batteryChargeCurrent ?? 0) - (data.batteryDischargeCurrent ?? 0)),
                 batteryState: data.batteryState || "idle",
+                batteryChargeCurrent: round(data.batteryChargeCurrent),
+                batteryDischargeCurrent: round(data.batteryDischargeCurrent),
+                battery1Voltage: round(data.battery1Voltage),
+                battery2Voltage: round(data.battery2Voltage),
+                battery3Voltage: round(data.battery3Voltage),
+                battery4Voltage: round(data.battery4Voltage),
                 status: 'online',
                 firmwareVersion: data.firmwareVersion ? String(data.firmwareVersion) : site.firmwareVersion,
                 signalStrengthDbm: data.signalStrength ? Number(data.signalStrength) : site.signalStrength,
@@ -302,6 +299,12 @@ export async function processIngestionInBackground(payload: any) {
                 batterySoc: round(data.soc),
                 batteryPowerKw: round((data.batteryChargeCurrent ?? 0) - (data.batteryDischargeCurrent ?? 0)),
                 batteryState: data.batteryState || "idle",
+                batteryChargeCurrent: round(data.batteryChargeCurrent),
+                batteryDischargeCurrent: round(data.batteryDischargeCurrent),
+                battery1Voltage: round(data.battery1Voltage),
+                battery2Voltage: round(data.battery2Voltage),
+                battery3Voltage: round(data.battery3Voltage),
+                battery4Voltage: round(data.battery4Voltage),
                 status: 'online',
                 lastSeen: ingestTime,
                 firmwareVersion: data.firmwareVersion ? String(data.firmwareVersion) : site.firmwareVersion,
@@ -309,49 +312,89 @@ export async function processIngestionInBackground(payload: any) {
                 uptimeSeconds: data.uptime ? Number(data.uptime) : site.uptime
             }
         });
-
-        // 4. Energy Calculation
-        let currentDay = await tx.currentDayEnergy.findUnique({ where: { siteId: site.id } });
-        if (!currentDay) {
-            await tx.currentDayEnergy.create({
-                data: { siteId: site.id, date: todayDate, solarEnergy: 0, gridEnergy: 0, loadEnergy: 0, lastUpdated: ingestTime }
-            });
-        } else {
-            const lastDate = new Date(currentDay.date);
-            const lastDateTime = Date.UTC(lastDate.getUTCFullYear(), lastDate.getUTCMonth(), lastDate.getUTCDate());
-            const todayDateTime = Date.UTC(todayDate.getUTCFullYear(), todayDate.getUTCMonth(), todayDate.getUTCDate());
-
-            if (lastDateTime < todayDateTime) {
-                await tx.dailyEnergy.upsert({
-                    where: { siteId_date: { siteId: site.id, date: currentDay.date } },
-                    create: { siteId: site.id, date: currentDay.date, solarEnergy: currentDay.solarEnergy, gridEnergy: currentDay.gridEnergy, loadEnergy: currentDay.loadEnergy },
-                    update: { solarEnergy: currentDay.solarEnergy, gridEnergy: currentDay.gridEnergy, loadEnergy: currentDay.loadEnergy }
-                });
-                await tx.currentDayEnergy.update({
-                    where: { siteId: site.id },
-                    data: { date: todayDate, solarEnergy: 0, gridEnergy: 0, loadEnergy: 0, lastUpdated: ingestTime }
-                });
-            } else {
-                const lastUpdatedSec = new Date(currentDay.lastUpdated).getTime();
-                const intervalHours = (ingestTime.getTime() - lastUpdatedSec) / (1000 * 60 * 60);
-                if (intervalHours > 0 && intervalHours < 24) {
-                    await tx.currentDayEnergy.update({
-                        where: { siteId: site.id },
-                        data: {
-                            solarEnergy: { increment: Number(((data.solarPower ?? 0) * intervalHours).toFixed(4)) },
-                            gridEnergy: { increment: Number(((data.gridPower ?? 0) * intervalHours).toFixed(4)) },
-                            loadEnergy: { increment: Number(((data.loadPower ?? 0) * intervalHours).toFixed(4)) },
-                            lastUpdated: ingestTime
-                        }
-                    });
-                }
-            }
-        }
     });
 
-    // 5. Trigger Alert Evaluator (Asynchronously via Queue)
-    await publishAlertToQueue(site.id, data);
-    console.log(`[Worker] Persisted telemetry for ${site.name} at ${ingestTime.toISOString()}`);
+    console.log(`[Worker1] Persisted telemetry for ${site.name} at ${ingestTime.toISOString()}`);
+
+    // ── FAN-OUT: Publish to Worker 2 (Energy) and Worker 3 (Alerts) ──────────
+    const fanOutPayload = { siteId: site.id, data, ingestTime: ingestTime.toISOString(), timezone: site.timezone };
+    await Promise.all([
+        publishEnergyToQueue(fanOutPayload),
+        publishAlertToQueue(site.id, data)
+    ]);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// WORKER 2: ENERGY PROCESSOR (Math-Only, No Writes to TelemetryData)
+// Responsibility: CurrentDayEnergy increment + DailyEnergy rollover
+// ═══════════════════════════════════════════════════════════════════════════
+export async function processEnergyCalculation(payload: any) {
+    const { siteId, data, ingestTime: ingestTimeStr, timezone } = payload;
+    const ingestTime = new Date(ingestTimeStr);
+    
+    const siteTimezone = timezone || "Asia/Kolkata";
+    const localDate = getSiteLocalDate(siteTimezone);
+    const todayDate = getStartOfSiteDay(localDate);
+
+    let currentDay = await (prisma as any).currentDayEnergy.findUnique({ where: { siteId } });
+    
+    if (!currentDay) {
+        await (prisma as any).currentDayEnergy.create({
+            data: { siteId, date: todayDate, solarEnergy: 0, gridEnergy: 0, loadEnergy: 0, lastUpdated: ingestTime }
+        });
+        console.log(`[Worker2] Created CurrentDayEnergy for ${siteId}`);
+    } else if (isDifferentDay(new Date(currentDay.date), todayDate)) {
+        // ── DAY ROLLOVER: Archive yesterday → reset for today ─────────────
+        await (prisma as any).dailyEnergy.upsert({
+            where: { siteId_date: { siteId, date: currentDay.date } },
+            create: { siteId, date: currentDay.date, solarEnergy: currentDay.solarEnergy, gridEnergy: currentDay.gridEnergy, loadEnergy: currentDay.loadEnergy },
+            update: { solarEnergy: currentDay.solarEnergy, gridEnergy: currentDay.gridEnergy, loadEnergy: currentDay.loadEnergy }
+        });
+        await (prisma as any).currentDayEnergy.update({
+            where: { siteId },
+            data: { date: todayDate, solarEnergy: 0, gridEnergy: 0, loadEnergy: 0, lastUpdated: ingestTime }
+        });
+        console.log(`[Worker2] Day rollover for ${siteId}`);
+    } else {
+        // ── SAME DAY: Increment energy using Riemann Sum ──────────────────
+        const lastUpdatedMs = new Date(currentDay.lastUpdated).getTime();
+        const intervalHours = (ingestTime.getTime() - lastUpdatedMs) / (1000 * 60 * 60);
+        
+        // ⛔ SAFETY: Only accept intervals between 0 and 1 hour (prevents runaway accumulation)
+        if (intervalHours > 0 && intervalHours <= 1) {
+            const solarIncrement = Number(((data.solarPower ?? 0) * intervalHours).toFixed(4));
+            const gridIncrement = Number(((data.gridPower ?? 0) * intervalHours).toFixed(4));
+            const loadIncrement = Number(((data.loadPower ?? 0) * intervalHours).toFixed(4));
+            
+            // ⛔ SAFETY CAP: No single increment should exceed 10 kWh (prevents corrupted data)
+            if (solarIncrement < 10 && gridIncrement < 10 && loadIncrement < 10) {
+                await (prisma as any).currentDayEnergy.update({
+                    where: { siteId },
+                    data: {
+                        solarEnergy: { increment: solarIncrement },
+                        gridEnergy: { increment: gridIncrement },
+                        loadEnergy: { increment: loadIncrement },
+                        lastUpdated: ingestTime
+                    }
+                });
+            } else {
+                console.warn(`[Worker2] ⛔ Safety cap hit for ${siteId}: solar=${solarIncrement}, grid=${gridIncrement}, load=${loadIncrement}`);
+                // Still update lastUpdated to prevent future stale intervals
+                await (prisma as any).currentDayEnergy.update({
+                    where: { siteId },
+                    data: { lastUpdated: ingestTime }
+                });
+            }
+        } else if (intervalHours > 1) {
+            // Stale gap > 1 hour: Just update the timestamp, don't accumulate
+            console.warn(`[Worker2] Skipping stale interval of ${intervalHours.toFixed(2)}h for ${siteId}`);
+            await (prisma as any).currentDayEnergy.update({
+                where: { siteId },
+                data: { lastUpdated: ingestTime }
+            });
+        }
+    }
+    console.log(`[Worker2] Energy processed for ${siteId}`);
 }
 
 /**
