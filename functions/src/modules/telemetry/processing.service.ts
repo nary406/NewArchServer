@@ -224,6 +224,7 @@ export async function processTelemetryWrite(payload: any) {
         // 1. Create Telemetry Record
         await tx.telemetryData.create({
             data: {
+                eventId: data.eventId, // Idempotency Key
                 siteId: site.id,
                 timestamp: ingestTime,
                 solarPower: round(data.solarPower),

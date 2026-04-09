@@ -114,6 +114,7 @@ model DeviceLiveStatus {
 
 model TelemetryData {
   id                      String   @id @default(cuid()) @map("Id")
+  eventId                 String?  @unique @map("EventId") // Idempotency key
   siteId                  String   @map("SiteId")
   timestamp               DateTime @map("Timestamp")
   solarPower              Float    @map("SolarPower")
