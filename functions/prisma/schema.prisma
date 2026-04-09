@@ -148,6 +148,7 @@ model AlertRule {
   parameter String
   operator  String
   threshold Float
+  resolveThreshold Float? // Hysteresis threshold to prevent alert flapping
   severity  String
   enabled   Boolean @default(true)
   site      Site    @relation(fields: [siteId], references: [id], onDelete: Cascade)
@@ -272,6 +273,13 @@ model DeadLetter {
 // 🔒 IDEMPOTENCY TRACKER FOR WORKER 2
 // Prevents double-incrementing energy during Pub/Sub retry loops
 model EnergyIdempotencyLog {
+  eventId   String   @id
+  processedAt DateTime @default(now())
+}
+
+// 🔒 IDEMPOTENCY TRACKER FOR WORKER 3
+// Prevents double-accumulating rolling state and double-incrementing alert counts
+model AlertIdempotencyLog {
   eventId   String   @id
   processedAt DateTime @default(now())
 }

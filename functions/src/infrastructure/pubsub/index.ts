@@ -59,7 +59,7 @@ export const processAlertQueue = functions.pubsub.topic("alert-processing-queue"
     try {
         payloadStr = message.data ? Buffer.from(message.data, 'base64').toString() : JSON.stringify(message.json);
         const payload = JSON.parse(payloadStr);
-        await evaluateAlertRulesInternal(payload.siteId, payload.deviceData);
+        await evaluateAlertRulesInternal(payload.siteId, payload.deviceData, payload.eventId);
     } catch(e: any) { 
         console.error(`[Worker3 Error]: ${e.message}`);
         await (prisma as any).deadLetter.create({

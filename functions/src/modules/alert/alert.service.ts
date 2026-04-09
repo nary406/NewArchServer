@@ -27,7 +27,17 @@ export async function getSiteAlertsInternal(userId: string, siteId: string) {
 // ⚡ TYPE 1: Instant Alerts (threshold checks, fire immediately)
 // 🧠 TYPE 2: Time-Window Alerts (rolling state, no heavy queries)
 // ═══════════════════════════════════════════════════════════════════════════
-export async function evaluateAlertRulesInternal(siteId: string, deviceData: any) {
+export async function evaluateAlertRulesInternal(siteId: string, deviceData: any, eventId?: string) {
+    // 🔒 IDEMPOTENT CONSUMER CHECK
+    if (eventId) {
+        try {
+            await (prisma as any).alertIdempotencyLog.create({ data: { eventId } });
+        } catch (e: any) {
+            console.warn(`[Worker3] Idempotency catch: Already processed alert for event ${eventId}`);
+            return;
+        }
+    }
+
     const site = await (prisma.site as any).findUnique({
         where: { id: siteId },
         include: { alertRules: true }
@@ -41,12 +51,26 @@ export async function evaluateAlertRulesInternal(siteId: string, deviceData: any
     for (const rule of rules) {
         const value = Number(deviceData[rule.parameter]) || 0;
         let triggered = false;
+        let resolved = false;
 
+        // Trigger logic
         switch(rule.operator) {
             case '>': triggered = value > rule.threshold; break;
             case '<': triggered = value < rule.threshold; break;
             case '==': triggered = value == rule.threshold; break;
             case '!=': triggered = value != rule.threshold; break;
+        }
+
+        // 🧲 HYSTERESIS LOGIC (Anti-Flapping)
+        if (rule.resolveThreshold !== null && rule.resolveThreshold !== undefined) {
+             if (rule.operator === '>') resolved = value < rule.resolveThreshold;
+             else if (rule.operator === '<') resolved = value > rule.resolveThreshold;
+             else resolved = !triggered;
+        } else {
+             // Fallback if no hysteresis defined
+             if (rule.operator === '>') resolved = value <= rule.threshold;
+             else if (rule.operator === '<') resolved = value >= rule.threshold;
+             else resolved = !triggered;
         }
 
         if (triggered) {
@@ -71,8 +95,8 @@ export async function evaluateAlertRulesInternal(siteId: string, deviceData: any
                 });
                 console.log(`[AlertEngine] ⚡ Instant: ${rule.name} for Site: ${site.name}`);
             }
-        } else {
-            // Auto-resolve if condition no longer met
+        } else if (resolved) {
+            // Auto-resolve if explicitly resolved via Hysteresis
             const activeAlert = await (prisma.alert as any).findFirst({
                 where: { siteId: site.id, ruleId: rule.id, isResolved: false }
             });
@@ -82,7 +106,7 @@ export async function evaluateAlertRulesInternal(siteId: string, deviceData: any
                     where: { id: activeAlert.id },
                     data: { isResolved: true, resolvedAt: new Date() }
                 });
-                console.log(`[AlertEngine] ✅ AUTO-RESOLVED: ${rule.name} for Site: ${site.name}`);
+                console.log(`[AlertEngine] ✅ AUTO-RESOLVED: ${rule.name} for Site: ${site.name} (Hysteresis Passed)`);
             }
         }
     }
