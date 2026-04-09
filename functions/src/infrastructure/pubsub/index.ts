@@ -1,4 +1,5 @@
 import * as functions from "firebase-functions";
+import prisma from "../../shared/db/prisma";
 import { evaluateAlertRulesInternal } from "../../modules/alert/alert.service";
 import { processTelemetryWrite, processEnergyCalculation } from "../../modules/telemetry/processing.service";
 
@@ -11,11 +12,16 @@ import { processTelemetryWrite, processEnergyCalculation } from "../../modules/t
  * ═══════════════════════════════════════════════════════════════════════════
  */
 export const processTelemetryIngestionQueue = functions.pubsub.topic("telemetry-ingestion-topic").onPublish(async (message) => {
+    let payloadStr = "{}";
     try {
-        const payload = message.json;
+        payloadStr = message.data ? Buffer.from(message.data, 'base64').toString() : JSON.stringify(message.json);
+        const payload = JSON.parse(payloadStr);
         await processTelemetryWrite(payload);
     } catch (e: any) {
         console.error(`[Worker1 Error]: ${e.message}`);
+        await (prisma as any).deadLetter.create({
+            data: { topic: "telemetry-ingestion", payload: payloadStr, error: e.stack || e.message }
+        }).catch(() => console.error("FATAL: Failed to write to DLQ"));
     }
 });
 
@@ -28,11 +34,16 @@ export const processTelemetryIngestionQueue = functions.pubsub.topic("telemetry-
  * ═══════════════════════════════════════════════════════════════════════════
  */
 export const processEnergyQueue = functions.pubsub.topic("energy-processing-topic").onPublish(async (message) => {
+    let payloadStr = "{}";
     try {
-        const payload = message.json;
+        payloadStr = message.data ? Buffer.from(message.data, 'base64').toString() : JSON.stringify(message.json);
+        const payload = JSON.parse(payloadStr);
         await processEnergyCalculation(payload);
     } catch (e: any) {
         console.error(`[Worker2 Error]: ${e.message}`);
+        await (prisma as any).deadLetter.create({
+            data: { topic: "energy-processing", payload: payloadStr, error: e.stack || e.message }
+        }).catch(() => console.error("FATAL: Failed to write to DLQ"));
     }
 });
 
@@ -44,10 +55,15 @@ export const processEnergyQueue = functions.pubsub.topic("energy-processing-topi
  * ═══════════════════════════════════════════════════════════════════════════
  */
 export const processAlertQueue = functions.pubsub.topic("alert-processing-queue").onPublish(async (message) => {
-    const payload = message.json;
+    let payloadStr = "{}";
     try {
+        payloadStr = message.data ? Buffer.from(message.data, 'base64').toString() : JSON.stringify(message.json);
+        const payload = JSON.parse(payloadStr);
         await evaluateAlertRulesInternal(payload.siteId, payload.deviceData);
     } catch(e: any) { 
-        console.error(`[Worker3 Error]: ${e.message}`, { siteId: payload.siteId });
+        console.error(`[Worker3 Error]: ${e.message}`);
+        await (prisma as any).deadLetter.create({
+            data: { topic: "alert-processing", payload: payloadStr, error: e.stack || e.message }
+        }).catch(() => console.error("FATAL: Failed to write to DLQ"));
     }
 });

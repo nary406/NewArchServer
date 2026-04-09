@@ -258,3 +258,20 @@ model DeviceAlertState {
   windowStart       DateTime @default(now())
   updatedAt         DateTime @updatedAt
 }
+
+// ☠️ DEAD LETTER QUEUE (DLQ)
+// Catches payloads that failed processing for forensic debugging
+model DeadLetter {
+  id          String   @id @default(cuid())
+  topic       String
+  payload     String
+  error       String?
+  createdAt   DateTime @default(now())
+}
+
+// 🔒 IDEMPOTENCY TRACKER FOR WORKER 2
+// Prevents double-incrementing energy during Pub/Sub retry loops
+model EnergyIdempotencyLog {
+  eventId   String   @id
+  processedAt DateTime @default(now())
+}

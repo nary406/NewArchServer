@@ -318,7 +318,7 @@ export async function processTelemetryWrite(payload: any) {
     console.log(`[Worker1] Persisted telemetry for ${site.name} at ${ingestTime.toISOString()}`);
 
     // ── FAN-OUT: Publish to Worker 2 (Energy) and Worker 3 (Alerts) ──────────
-    const fanOutPayload = { siteId: site.id, data, ingestTime: ingestTime.toISOString(), timezone: site.timezone };
+    const fanOutPayload = { eventId: data.eventId, siteId: site.id, data, ingestTime: ingestTime.toISOString(), timezone: site.timezone };
     await Promise.all([
         publishEnergyToQueue(fanOutPayload),
         publishAlertToQueue(site.id, data)
@@ -330,8 +330,19 @@ export async function processTelemetryWrite(payload: any) {
 // Responsibility: CurrentDayEnergy increment + DailyEnergy rollover
 // ═══════════════════════════════════════════════════════════════════════════
 export async function processEnergyCalculation(payload: any) {
-    const { siteId, data, ingestTime: ingestTimeStr, timezone } = payload;
+    const { siteId, data, ingestTime: ingestTimeStr, timezone, eventId } = payload;
     const ingestTime = new Date(ingestTimeStr);
+
+    // 🔒 IDEMPOTENT CONSUMER CHECK
+    if (eventId) {
+        try {
+            await (prisma as any).energyIdempotencyLog.create({ data: { eventId } });
+        } catch (e: any) {
+            // Prisma throws P2002 if eventId already exists (meaning we already processed this exact message!)
+            console.warn(`[Worker2] Idempotency catch: Already processed energy for event ${eventId}`);
+            return;
+        }
+    }
     
     const siteTimezone = timezone || "Asia/Kolkata";
     const localDate = getSiteLocalDate(siteTimezone);
