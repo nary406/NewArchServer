@@ -26,3 +26,31 @@ export const runDatabaseMaintenance = functions.pubsub.schedule("0 3 * * *")
     for (const site of sites) { await syncEnergyAggregates(site.id, dateStr); }
     console.log(`[Maintenance] All site aggregates synced for ${dateStr}`);
 });
+
+export const processOutboxSweeper = functions.pubsub
+  .schedule("every 1 minutes")
+  .onRun(async () => {
+    const pendingEvents = await (prisma as any).outboxEvent.findMany({
+        where: { status: "PENDING" },
+        take: 100 // Process in chunks to prevent timeout
+    });
+
+    if (pendingEvents.length === 0) return null;
+    
+    console.log(`[OutboxSweeper] Found ${pendingEvents.length} pending fan-out events...`);
+    
+    const { PubSub } = require("@google-cloud/pubsub");
+    const pubsub = new PubSub();
+
+    for (const event of pendingEvents) {
+        try {
+            const dataBuffer = Buffer.from(event.payload);
+            await pubsub.topic(event.topic).publishMessage({ data: dataBuffer });
+            
+            await (prisma as any).outboxEvent.delete({ where: { id: event.id } });
+        } catch (e: any) {
+            console.error(`[OutboxSweeper] Failed to publish event ${event.id}: ${e.message}`);
+        }
+    }
+    return null;
+});

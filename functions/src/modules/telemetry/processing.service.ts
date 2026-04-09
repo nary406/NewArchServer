@@ -313,16 +313,38 @@ export async function processTelemetryWrite(payload: any) {
                 uptimeSeconds: data.uptime ? Number(data.uptime) : site.uptime
             }
         });
+
+        // 4. Create Outbox events for perfect reliability! (Transactional Outbox Pattern)
+        const fanOutPayload = { eventId: data.eventId, siteId: site.id, data, ingestTime: ingestTime.toISOString(), timezone: site.timezone };
+        const alertPayload = { siteId: site.id, deviceData: data, timestamp: new Date().toISOString() };
+        
+        await tx.outboxEvent.createMany({
+            data: [
+                { topic: 'energy-processing-topic', payload: JSON.stringify(fanOutPayload), eventId: data.eventId || null },
+                { topic: 'alert-processing-queue', payload: JSON.stringify(alertPayload), eventId: data.eventId || null }
+            ]
+        });
     });
 
-    console.log(`[Worker1] Persisted telemetry for ${site.name} at ${ingestTime.toISOString()}`);
+    console.log(`[Worker1] Persisted telemetry & outbox for ${site.name} at ${ingestTime.toISOString()}`);
 
-    // ── FAN-OUT: Publish to Worker 2 (Energy) and Worker 3 (Alerts) ──────────
-    const fanOutPayload = { eventId: data.eventId, siteId: site.id, data, ingestTime: ingestTime.toISOString(), timezone: site.timezone };
-    await Promise.all([
-        publishEnergyToQueue(fanOutPayload),
-        publishAlertToQueue(site.id, data)
-    ]);
+    // ── FAN-OUT: Immediate attempt to minimize latency ──────────
+    try {
+        const fanOutPayload = { eventId: data.eventId, siteId: site.id, data, ingestTime: ingestTime.toISOString(), timezone: site.timezone };
+        await Promise.all([
+            publishEnergyToQueue(fanOutPayload),
+            publishAlertToQueue(site.id, data)
+        ]);
+
+        // If successful, safely purge outbox
+        if (data.eventId) {
+            await (prisma as any).outboxEvent.deleteMany({
+                where: { eventId: data.eventId }
+            });
+        }
+    } catch (e: any) {
+        console.warn(`[Worker1] Immediate fan-out failed. Transactional Sweeper will pick it up. Error: ${e.message}`);
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

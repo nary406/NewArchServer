@@ -275,3 +275,14 @@ model EnergyIdempotencyLog {
   eventId   String   @id
   processedAt DateTime @default(now())
 }
+
+// 📦 TRANSACTIONAL OUTBOX PATTERN
+// Guarantees reliable event fan-out if the telemetry worker crashes after a DB write
+model OutboxEvent {
+  id        String   @id @default(cuid())
+  eventId   String?  // Idempotency correlation
+  topic     String
+  payload   String
+  status    String   @default("PENDING") // PENDING, PUBLISHED, FAILED
+  createdAt DateTime @default(now())
+}
